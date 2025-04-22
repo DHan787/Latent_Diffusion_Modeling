@@ -1,144 +1,93 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from typing import List
 from uuid import uuid4
-import base64, io, os, subprocess, shlex, datetime
-from typing import Optional, Dict
+from datetime import datetime
+from io import BytesIO
+import os, base64, json
+from PIL import Image
+from model_loader import load_model, generate_image as run_model
 
-from diffusion import get_pipeline, generate_image
-from fine_tune import launch_fine_tune, JobStatus, job_registry
+app = FastAPI()
 
-app = FastAPI(title="Stable‑Diffusion Backend", version="1.0.0")
-
-# CORS so that any front‑end (React / Next.js / etc.) can call us
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------------
-# Schemas
-# ---------------------
-class GenerateRequest(BaseModel):
+GALLERY_DIR = "gallery_images"
+METADATA_FILE = os.path.join(GALLERY_DIR, "metadata.json")
+os.makedirs(GALLERY_DIR, exist_ok=True)
+
+# === 初始化元数据 ===
+if not os.path.exists(METADATA_FILE):
+    with open(METADATA_FILE, "w") as f:
+        json.dump({}, f)
+
+# === 请求模型 ===
+class PromptRequest(BaseModel):
     prompt: str
-    num_inference_steps: int = 30
-    guidance_scale: float = 7.5
-    height: int = 512
-    width: int = 512
-    seed: Optional[int] = None
 
-class GenerateResponse(BaseModel):
-    request_id: str
-    image_base64: str  # PNG base64 string (front‑end turns it into <img src="data:image/png;base64,…">)
+class SaveImageRequest(BaseModel):
+    image: str  # base64
+    prompt: str
 
-class FineTuneRequest(BaseModel):
-    dataset_name: str              # e.g. "lambdalabs/naruto-blip-captions"
-    output_dir: str                # where to write checkpoints /logs
-    max_train_steps: int = 1000
-    learning_rate: float = 1e-6
+# === 加载模型 ===
+pipe = load_model()
 
-class FineTuneResponse(BaseModel):
-    job_id: str
-    message: str
-
-class FineTuneStatus(BaseModel):
-    job_id: str
-    state: JobStatus
-    started_at: Optional[datetime.datetime]
-    finished_at: Optional[datetime.datetime]
-    progress: Optional[str]
-
-# ---------------------
-# Routes
-# ---------------------
-@app.post("/generate", response_model=GenerateResponse)
-async def generate_endpoint(body: GenerateRequest):
-    pipeline = get_pipeline()  # lazy‑loaded, cached
-
-    try:
-        image = await generate_image(
-            pipeline,
-            prompt=body.prompt,
-            num_inference_steps=body.num_inference_steps,
-            guidance_scale=body.guidance_scale,
-            height=body.height,
-            width=body.width,
-            seed=body.seed,
-        )
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    # convert to b64 PNG
-    buffer = io.BytesIO()
+# === 图像生成 API ===
+@app.post("/generate")
+def generate(req: PromptRequest):
+    image = run_model(pipe, req.prompt)
+    buffer = BytesIO()
     image.save(buffer, format="PNG")
-    img_str = base64.b64encode(buffer.getvalue()).decode()
+    img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return {"image_base64": img_str}
 
-    return GenerateResponse(request_id=str(uuid4()), image_base64=img_str)
+# === 保存图片 API ===
+@app.post("/images")
+def save_image(req: SaveImageRequest):
+    image_id = str(uuid4())
+    file_path = os.path.join(GALLERY_DIR, f"{image_id}.png")
+    with open(file_path, "wb") as f:
+        f.write(base64.b64decode(req.image))
 
+    with open(METADATA_FILE, "r+") as f:
+        data = json.load(f)
+        data[image_id] = {
+            "prompt": req.prompt,
+            "createdAt": datetime.now().isoformat()
+        }
+        f.seek(0)
+        json.dump(data, f, indent=2)
+        f.truncate()
 
-@app.post("/fine_tune", response_model=FineTuneResponse)
-async def fine_tune_endpoint(body: FineTuneRequest, background_tasks: BackgroundTasks):
-    job_id = str(uuid4())
-    background_tasks.add_task(
-        launch_fine_tune,
-        job_id=job_id,
-        dataset_name=body.dataset_name,
-        output_dir=body.output_dir,
-        max_train_steps=body.max_train_steps,
-        learning_rate=body.learning_rate,
-    )
-    return FineTuneResponse(job_id=job_id, message="Fine‑tuning started in background")
+    return {"success": True, "id": image_id, "url": f"/images/{image_id}.png"}
 
+# === 列出图片 API ===
+@app.get("/images")
+def list_images():
+    with open(METADATA_FILE, "r") as f:
+        data = json.load(f)
+    results = []
+    for image_id, meta in data.items():
+        results.append({
+            "id": image_id,
+            "url": f"/images/{image_id}.png",
+            "prompt": meta["prompt"],
+            "createdAt": meta["createdAt"]
+        })
+    return {"images": results}
 
-@app.get("/fine_tune/{job_id}", response_model=FineTuneStatus)
-async def fine_tune_status(job_id: str):
-    status = job_registry.get(job_id)
-    if status is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return status
-
-
-# =====================
-# app/diffusion.py
-# =====================
-from diffusers import StableDiffusionPipeline
-from torch import cuda, Generator
-import torch, asyncio
-
-_MODEL_ID = "runwayml/stable-diffusion-v1-5"  # change if you fine‑tune and want to load new weights
-_DEVICE = "cuda" if cuda.is_available() else "cpu"
-_PIPE = None  # cached global
-
-
-def get_pipeline():
-    global _PIPE
-    if _PIPE is None:
-        dtype = torch.float16 if _DEVICE == "cuda" else torch.float32
-        _PIPE = StableDiffusionPipeline.from_pretrained(_MODEL_ID, torch_dtype=dtype)
-        _PIPE.to(_DEVICE)
-        _PIPE.safety_checker = None  # disable NSFW filtering; add your own if needed
-    return _PIPE
-
-
-async def generate_image(pipeline: StableDiffusionPipeline, **kwargs):
-    # run in a threadpool to avoid blocking event‑loop
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _sync_generate, pipeline, kwargs)
-
-
-def _sync_generate(pipeline, kwargs):
-    generator = None
-    if kwargs.get("seed") is not None:
-        generator = Generator(_DEVICE).manual_seed(kwargs["seed"])
-    image = pipeline(
-        kwargs["prompt"],
-        num_inference_steps=kwargs["num_inference_steps"],
-        guidance_scale=kwargs["guidance_scale"],
-        height=kwargs["height"],
-        width=kwargs["width"],
-        generator=generator,
-    ).images[0]
-    return image
+# === 下载图片 API ===
+@app.get("/images/{filename}")
+def get_image(filename: str):
+    path = os.path.join(GALLERY_DIR, filename)
+    if os.path.exists(path):
+        return FileResponse(path, media_type="image/png")
+    return {"error": "Image not found"}
