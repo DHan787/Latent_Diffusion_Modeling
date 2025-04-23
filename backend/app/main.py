@@ -54,8 +54,15 @@ def generate(req: PromptRequest):
 def save_image(req: SaveImageRequest):
     image_id = str(uuid4())
     file_path = os.path.join(GALLERY_DIR, f"{image_id}.png")
+
+    # 👉 去掉 data:image/... 前缀，只保留 base64 数据部分
+    if "," in req.image:
+        base64_data = req.image.split(",")[1]
+    else:
+        base64_data = req.image
+
     with open(file_path, "wb") as f:
-        f.write(base64.b64decode(req.image))
+        f.write(base64.b64decode(base64_data))
 
     with open(METADATA_FILE, "r+") as f:
         data = json.load(f)
