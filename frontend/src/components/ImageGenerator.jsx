@@ -1,6 +1,10 @@
 import React, { useState } from 'react';
 import LoadingSpinner from './LoadingSpinner';
+
+// this is for frontend test:
 import { generateImage, saveImage } from '../services/mock-api';
+// import real api when backend is ready
+// import { generateImage, saveImage } from '../services/api';
 
 const ImageGenerator = () => {
   const [prompt, setPrompt] = useState('');

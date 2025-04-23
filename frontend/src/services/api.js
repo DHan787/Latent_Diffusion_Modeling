@@ -97,9 +97,33 @@ export const saveImage = async (imageUrl, prompt) => {
   }
 };
 
+/**
+ * Delete image from gallery
+ * @param {string} imageId - ID of the image to delete
+ * @returns {Promise<Object>} - Delete result
+ */
+export const deleteImage = async (imageId) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/images/${imageId}`, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Failed to delete image');
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error deleting image:', error);
+    throw error;
+  }
+};
+
 // Export all API functions
 export default {
   generateImage,
   getSavedImages,
-  saveImage
+  saveImage,
+  deleteImage
 };
