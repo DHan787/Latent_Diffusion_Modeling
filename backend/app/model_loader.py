@@ -17,7 +17,7 @@ def load_model():
     # 构建 LoRA 权重所在目录
     lora_path = os.path.join(
         PROJECT_ROOT,
-        "model", "Latent_Diffusion_model", "Latent_Diffusion_model", "sd-fine-tuned-lora"
+        "model", "Latent_Diffusion_model", "Latent_Diffusion_model", "sd-fine-tuned-lora-jh"
     )
 
     pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32)

@@ -1,3 +1,5 @@
+from http.client import HTTPException
+
 from fastapi import FastAPI, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -55,7 +57,6 @@ def save_image(req: SaveImageRequest):
     image_id = str(uuid4())
     file_path = os.path.join(GALLERY_DIR, f"{image_id}.png")
 
-    # 👉 去掉 data:image/... 前缀，只保留 base64 数据部分
     if "," in req.image:
         base64_data = req.image.split(",")[1]
     else:
@@ -91,10 +92,33 @@ def list_images():
         })
     return {"images": results}
 
-# === 下载图片 API ===
-@app.get("/images/{filename}")
-def get_image(filename: str):
-    path = os.path.join(GALLERY_DIR, filename)
-    if os.path.exists(path):
-        return FileResponse(path, media_type="image/png")
-    return {"error": "Image not found"}
+@app.delete("/images/{image_id}")
+def delete_image(image_id: str):
+    image_path = os.path.join(GALLERY_DIR, f"{image_id}.png")
+
+    # 删除图像文件
+    if os.path.exists(image_path):
+        os.remove(image_path)
+    else:
+        raise HTTPException(status_code=404, detail="Image file not found")
+
+    # 删除元数据
+    with open(METADATA_FILE, "r+") as f:
+        data = json.load(f)
+        if image_id in data:
+            del data[image_id]
+            f.seek(0)
+            json.dump(data, f, indent=2)
+            f.truncate()
+        else:
+            raise HTTPException(status_code=404, detail="Image metadata not found")
+
+    return {"success": True, "id": image_id}
+
+@app.get("/images/{image_filename}")
+def get_image(image_filename: str):
+    file_path = os.path.join(GALLERY_DIR, image_filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="image/png")
+    else:
+        raise HTTPException(status_code=404, detail="Image not found")
